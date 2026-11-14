@@ -1,4 +1,4 @@
-"""Menu bar app: status icon, Ask…, push-to-talk (⌥Space), approvals, undo, Stop everything (⌃⌥⌘.)."""
+"""Menu bar app: status icon, Ask…, "Hey Jarvis", push-to-talk (⌥Space), approvals, undo, Stop everything (⌃⌥⌘.)."""
 import threading
 
 import rumps
@@ -8,6 +8,7 @@ from quickmachotkey.constants import cmdKey, controlKey, kVK_ANSI_Period, kVK_Sp
 
 from . import client, config
 from .voice import stt, tts
+from .voice.wake import WakeListener
 
 READY, LISTENING, THINKING, OFFLINE, PAUSED = "◯", "●", "◐", "◌", "‖"
 
@@ -30,8 +31,40 @@ class JarvisApp(rumps.App):
             rumps.MenuItem("Stop everything  (⌃⌥⌘.)", callback=lambda _: stop_everything()),
             rumps.MenuItem("Stop speaking", callback=lambda _: tts.stop()),
         ]
+        self.wake_item = rumps.MenuItem("Listen for “Hey Jarvis”", callback=self.toggle_wake)
+        self.menu.insert_after("Push to talk  (⌥Space)", self.wake_item)
+        v = self.cfg["voice"]
+        self.wake = WakeListener(on_command=self._wake_command, on_wake=self._on_wake, threshold=v["wake_threshold"],
+                                 muted=lambda: self.busy or self.rec.recording or tts.speaking())
+        if v["wake_word"]:
+            self._set_wake(True)
+        self._background(lambda: stt.preload(v["stt_model"]))  # first command shouldn't wait for model load
         self.timer = rumps.Timer(self.refresh, 15)
         self.timer.start()
+
+    # --- "Hey Jarvis" ---
+    def _set_wake(self, on: bool) -> None:
+        try:
+            self.wake.start() if on else self.wake.stop()
+        except Exception as e:  # no mic or permission denied
+            rumps.notification("Jarvis", "Can't listen for “Hey Jarvis”", str(e))
+        self.wake_item.state = int(self.wake.running)
+
+    def toggle_wake(self, _) -> None:
+        self._set_wake(not self.wake.running)
+
+    def _on_wake(self) -> None:  # worker thread
+        tts.stop()
+        tts.chime()
+        AppHelper.callAfter(setattr, self, "title", LISTENING)
+
+    def _wake_command(self, audio) -> None:  # worker thread: transcribe, act, speak
+        self.busy = True
+        AppHelper.callAfter(setattr, self, "title", THINKING)
+        try:
+            self._handle_audio(audio)
+        except Exception as e:
+            self._call_after_show("", f"Something went wrong: {e}")
 
     def refresh(self, _=None) -> None:
         if self.rec.recording or self.busy:
@@ -60,7 +93,7 @@ class JarvisApp(rumps.App):
         self.busy = False
         rumps.notification("Jarvis", f"You: {heard}" if heard else "", reply)
         if speak:
-            tts.speak(reply)
+            tts.speak(reply, self.cfg["voice"]["tts_voice"])
         self.refresh()
         for p in pending:
             self._approve(p)

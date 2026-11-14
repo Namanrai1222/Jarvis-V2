@@ -31,9 +31,19 @@ class Recorder:
         return np.concatenate(self._chunks)[:, 0] if self._chunks else np.zeros(0, np.float32)
 
 
+def preload(model: str) -> None:
+    """Load Whisper before the first command (saves ~1 s then) by transcribing half a second of near-silence."""
+    transcribe(np.zeros(RATE // 2 + 1, np.float32) + 1e-4, model)
+
+
 def transcribe(audio: np.ndarray, model: str, language: str | None = "en") -> str:
     if audio.size < RATE * 0.3:  # under 0.3 s is a mis-press
         return ""
     import mlx_whisper  # slow import; only load when voice is used
 
-    return mlx_whisper.transcribe(audio, path_or_hf_repo=model, language=language)["text"].strip()
+    text = mlx_whisper.transcribe(audio, path_or_hf_repo=model, language=language)["text"].strip()
+    # Whisper "hears" these in silence or noise; never act on them
+    return "" if text.lower().strip(" .!") in HALLUCINATIONS else text
+
+
+HALLUCINATIONS = {"", "thank you", "thanks for watching", "thank you for watching", "you", "bye", "okay"}

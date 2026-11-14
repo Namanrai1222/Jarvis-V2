@@ -44,9 +44,13 @@ DEFAULTS = {
     # include_code: also index source files (off: big projects take long to embed on a laptop)
     "documents": {"index_folders": ["~/Documents/College", "~/Documents/Projects"], "include_code": False},
     "voice": {
-        "stt_model": "mlx-community/whisper-large-v3-turbo",
+        # 4-bit Turbo: same accuracy class, 464 MB instead of 1.6 GB, so it fits beside the 8B model
+        "stt_model": "mlx-community/whisper-large-v3-turbo-q4",
         "language": "en",  # Hinglish comes out romanised, which the fast path understands
         "speak_replies": True,
+        "wake_word": True,          # "Hey Jarvis": mic listens on the CPU; audio stays in memory
+        "wake_threshold": 0.5,
+        "tts_voice": "",            # empty = best installed English voice (Premium/Enhanced first, then Rishi)
     },
 }
 
