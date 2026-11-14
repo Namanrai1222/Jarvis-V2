@@ -1,5 +1,6 @@
 """jarvisd: wires the agent together and serves the API on 127.0.0.1 (browser) and a Unix socket (CLI, menu bar)."""
 import asyncio
+import itertools
 import re
 import time
 import uuid
@@ -10,7 +11,7 @@ import uvicorn
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from . import config
+from . import config, secrets
 from .activity import Activity
 from .agent import context, fastpath, planner
 from .agent.executor import Executor
@@ -20,6 +21,9 @@ from .documents.extract import DOC_EXT
 from .documents.index import DocIndex
 from .memory import capture
 from .memory.store import MemoryStore
+from .notify import presence
+from .notify.notifier import Notifier
+from .notify.telegram import Telegram
 from .policy.pending import PendingStore
 from .tools import STOP
 from .tools import docs as doc_tools
@@ -28,6 +32,17 @@ REQUEST_TIMEOUT = 120  # reading a PDF or a screenshot can take a while on batte
 INBOX = Path.home() / "Jarvis/Inbox"
 _CONFIRM = re.compile(r"^(?:confirm|yes|haan|ha|ok|do it|kar do)(?:\s+(a\d+))?$")
 _CANCEL = re.compile(r"^(?:cancel|no|nahi|mat karo)(?:\s+(a\d+))?$")
+_REMOTE_ANSWER = re.compile(r"^(a\d+)\s+(yes|y|ok|confirm|haan|ha|no|n|cancel|nahi|skip|stop)$")
+PHONE_TTL = 3600  # a decision sent to the phone gets an hour to be answered (DESIGN §9.4)
+
+
+def mac_notification(text: str) -> None:
+    """Notification Center banner; text passed as an argument so it can't inject script."""
+    import subprocess
+
+    subprocess.run(["osascript", "-l", "JavaScript", "-e",
+                    "function run(a){var s=Application.currentApplication();s.includeStandardAdditions=true;"
+                    "s.displayNotification(a[0],{withTitle:'Jarvis'})}", text[:300]], capture_output=True)
 
 
 def _clean(reply: str) -> str:
@@ -38,7 +53,15 @@ def _clean(reply: str) -> str:
 class Jarvis:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
-        self.pending = PendingStore()
+        self.pending = PendingStore(on_add=self._on_pending)
+        token, chat = secrets.get("telegram_token"), secrets.get("telegram_chat_id")
+        self.telegram = Telegram(token) if token and chat else None
+        self.chat_id = int(chat) if chat else None
+        away = cfg["notify"]["away_after_min"] * 60
+        self.notifier = Notifier(cfg, mac=mac_notification, present=lambda: presence.present(away),
+                                 remote=(lambda text, buttons: self.telegram.send(self.chat_id, text, buttons))
+                                 if self.telegram else None)
+        self.bad_tokens: list[float] = []
         self.activity = Activity(str(config.APP_DIR / "jarvis.db"))
         self.memory = MemoryStore(str(config.APP_DIR / "jarvis.db"))
         embed_model = cfg["models"]["embed"]
@@ -48,6 +71,48 @@ class Jarvis:
         doc_tools.INDEX = self.docs
         self.executor = Executor(cfg, self.activity, self.pending)
         self.running: set[asyncio.Task] = set()
+
+    # --- reaching Naman when he's away (M5) ---
+    def _on_pending(self, p) -> None:
+        if self.telegram and not presence.present(self.cfg["notify"]["away_after_min"] * 60):
+            self.pending.extend(p.id, PHONE_TTL)
+        self.notifier.notify(f"{p.id} — I need your OK: {p.summary}", "decision", key=p.id,
+                             buttons=[("✅ Confirm", f"{p.id} yes"), ("✖ Cancel", f"{p.id} no")])
+
+    def _still_open(self, pid: str) -> bool:
+        """Notifier asks before escalating; escalated decisions get the phone's longer expiry."""
+        return self.pending.extend(pid, PHONE_TTL)
+
+    def bad_token(self) -> None:
+        now = time.time()
+        self.bad_tokens = [t for t in self.bad_tokens if now - t < 600] + [now]
+        if len(self.bad_tokens) == 10:
+            self.notifier.notify("Security: 10 requests with a wrong Jarvis token in 10 minutes. "
+                                 "Something on the Mac may be probing Jarvis.", "critical")
+
+    async def remote(self, text: str) -> str:
+        """A message from Naman's paired Telegram chat: answers and controls only, never new actions."""
+        t = re.sub(r"[.!?]+$", "", text.strip().lower())
+        if t.startswith("/start"):
+            return "Jarvis here. I'll message you when I need a decision or something urgent happens."
+        if m := _REMOTE_ANSWER.match(t):
+            yes = m.group(2) in {"yes", "y", "ok", "confirm", "haan", "ha"}
+            fn = self.executor.confirm if yes else self.executor.cancel
+            return await asyncio.to_thread(fn, m.group(1))
+        if t in {"stop", "stop everything"}:
+            reply = await self.stop()
+            mac_notification("Kill switch used from Telegram.")
+            return reply
+        if t in {"pause", "resume"}:
+            return await asyncio.to_thread(self._control, t)
+        if t == "status":
+            items = self.pending.list()
+            waiting = "; ".join(f"{p.id}: {p.summary}" for p in items) or "nothing waiting"
+            return f"{'Paused' if self.executor.paused else 'Running'}. Waiting for you: {waiting}."
+        note, _ = capture.redact(text)
+        await asyncio.to_thread(self.memory.add, "episode", f"(sent from Telegram) {note}", reply="saved as a note")
+        return ("Saved as a note for when you're back. From Telegram I only take answers (A3 yes / A3 no), "
+                "status, stop, pause and resume.")
 
     # --- control words (trusted: only Naman types or speaks to Jarvis) ---
     def _control(self, t: str) -> str | None:
@@ -199,7 +264,7 @@ def build_app():
     config.ensure_app_dir()
     j = Jarvis(config.load())
     token = config.new_token()
-    app = create_app(token)
+    app = create_app(token, on_bad_token=j.bad_token)
     page = (Path(__file__).parent / "ui/index.html").read_text().replace("__JARVIS_TOKEN__", token)
 
     @app.get("/", response_class=HTMLResponse)
@@ -292,6 +357,7 @@ async def index_loop(j: Jarvis) -> None:
             print(f"document index: {stats}", flush=True)
         except Exception as e:
             print(f"document index failed: {e}", flush=True)
+            j.notifier.notify(f"Document indexing failed: {e}", "normal")
         await asyncio.sleep(3600)
 
 
@@ -312,7 +378,73 @@ async def purge_loop(j: Jarvis) -> None:
                 await asyncio.to_thread(_clean_jarvis_files, time.time())
             except Exception as e:  # never crash the daemon over a purge; it retries next hour
                 print(f"memory purge failed: {e}", flush=True)
+                j.notifier.notify(f"Memory purge failed: {e}. I'll retry within the hour.", "normal")
         await asyncio.sleep(3600)
+
+
+async def notify_loop(j: Jarvis) -> None:
+    """Escalations and held messages every 30 s; battery and disk checks every 5 min (U11)."""
+    warned: set[str] = set()
+    for n in itertools.count():
+        await asyncio.to_thread(j.notifier.tick, j._still_open)
+        if n % 10 == 0:
+            for key, problem in (await asyncio.to_thread(_power_and_disk)).items():
+                if problem and key not in warned:
+                    warned.add(key)
+                    j.notifier.notify(problem, "high")
+                elif not problem:
+                    warned.discard(key)
+        await asyncio.sleep(30)
+
+
+def _power_and_disk() -> dict[str, str]:
+    import shutil
+    import subprocess
+
+    out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+    m = re.search(r"(\d+)%;\s*discharging", out)
+    free_gb = shutil.disk_usage("/System/Volumes/Data").free / 1e9
+    return {
+        "battery": f"Battery at {m.group(1)}% and not charging. I've paused heavy work like indexing."
+        if m and int(m.group(1)) < 10 else "",
+        "disk": f"Only {free_gb:.1f} GB of disk space left." if free_gb < 5 else "",
+    }
+
+
+async def telegram_loop(j: Jarvis) -> None:
+    """Long-poll Telegram. Only the paired chat is listened to; messages older than 5 min are ignored."""
+    if j.telegram is None:
+        return
+    offset, strangers = 0, []
+    while True:
+        try:
+            updates = await asyncio.to_thread(j.telegram.updates, offset)
+        except Exception as e:
+            print(f"telegram poll failed: {e}", flush=True)
+            await asyncio.sleep(30)
+            continue
+        for u in updates:
+            offset = u["update_id"] + 1
+            button = u.get("callback_query")
+            msg = button["message"] if button else u.get("message")
+            sender = (button or u.get("message") or {}).get("from", {}).get("id")
+            if not msg or sender != j.chat_id or msg["chat"]["id"] != j.chat_id:
+                now = time.time()
+                strangers = [t for t in strangers if now - t < 3600] + [now]
+                if len(strangers) == 3:
+                    j.notifier.notify("Security: 3 messages from unknown Telegram accounts in an hour. "
+                                      "They were ignored.", "critical")
+                continue
+            if not button and time.time() - msg["date"] > 300:
+                continue  # old or replayed
+            text = button["data"] if button else (msg.get("text") or "")
+            reply = await j.remote(text) if text else "I can only read text messages."
+            try:
+                if button:
+                    await asyncio.to_thread(j.telegram.answer_button, button["id"], reply)
+                await asyncio.to_thread(j.telegram.send, j.chat_id, reply)
+            except Exception as e:
+                print(f"telegram reply failed: {e}", flush=True)
 
 
 async def _serve() -> None:
@@ -321,7 +453,8 @@ async def _serve() -> None:
     # uvicorn makes the socket 0666; the 0700 app dir and the token still keep other users out
     tcp = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=config.PORT, log_level="warning"))
     uds = uvicorn.Server(uvicorn.Config(app, uds=str(config.SOCK_PATH), log_level="warning"))
-    await asyncio.gather(tcp.serve(), uds.serve(), purge_loop(app.state.jarvis), index_loop(app.state.jarvis))
+    j = app.state.jarvis
+    await asyncio.gather(tcp.serve(), uds.serve(), purge_loop(j), index_loop(j), notify_loop(j), telegram_loop(j))
 
 
 def serve() -> None:

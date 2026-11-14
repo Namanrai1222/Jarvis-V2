@@ -26,16 +26,28 @@ class Pending:
 
 
 class PendingStore:
-    def __init__(self, clock=time.time) -> None:
+    def __init__(self, clock=time.time, on_add=None) -> None:
         self._items: dict[str, Pending] = {}
         self._ids = itertools.count(1)
         self._clock = clock
+        self.on_add = on_add  # e.g. tell the notifier a decision is waiting
 
     def add(self, tool: str, args: dict, summary: str, tainted: bool, request_id: str) -> Pending:
         p = Pending(f"A{next(self._ids)}", tool, json.dumps(args, sort_keys=True), summary, tainted, request_id,
                     expires=self._clock() + TTL)
         self._items[p.id] = p
+        if self.on_add:
+            self.on_add(p)
         return p
+
+    def extend(self, pid: str, seconds: float) -> bool:
+        """Give a decision sent to Naman's phone time to be answered (DESIGN §9.4: 60 min)."""
+        self._expire()
+        p = self._items.get(pid.upper())
+        if p is None:
+            return False
+        p.expires = max(p.expires, self._clock() + seconds)
+        return True
 
     def _expire(self) -> None:
         now = self._clock()

@@ -43,6 +43,11 @@ DEFAULTS = {
     # folders whose documents are indexed for search (must be inside allowed_roots)
     # include_code: also index source files (off: big projects take long to embed on a laptop)
     "documents": {"index_folders": ["~/Documents/College", "~/Documents/Projects"], "include_code": False},
+    "notify": {
+        "quiet_hours": ["23:30", "07:30"],   # only critical alerts reach your phone in this window
+        "max_per_hour": 6,
+        "away_after_min": 10,
+    },
     "voice": {
         # 4-bit Turbo: same accuracy class, 464 MB instead of 1.6 GB, so it fits beside the 8B model
         "stt_model": "mlx-community/whisper-large-v3-turbo-q4",

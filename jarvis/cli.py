@@ -1,4 +1,4 @@
-"""`jarvis` command: serve, menubar, doctor, ask, listen, install, uninstall."""
+"""`jarvis` command: serve, menubar, doctor, ask, listen, install, uninstall, telegram."""
 import argparse
 import os
 import plistlib
@@ -62,6 +62,54 @@ def uninstall() -> int:
     return 0
 
 
+def telegram(action: str) -> int:
+    """Pair Jarvis with your Telegram (free, official Bot API). You type the token; it goes to the Keychain."""
+    import getpass
+    import secrets as rnd
+
+    from . import secrets
+    from .notify.telegram import Telegram
+
+    restart = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.namanrai.jarvis.daemon"]
+    if action == "test":
+        token, chat = secrets.get("telegram_token"), secrets.get("telegram_chat_id")
+        if not (token and chat):
+            raise SystemExit("Not paired yet. Run: uv run jarvis telegram setup")
+        Telegram(token).send(int(chat), "Test from Jarvis ✅ Notifications reach your phone.")
+        print("Sent. Check Telegram.")
+        return 0
+    if action == "unpair":
+        secrets.delete("telegram_token")
+        secrets.delete("telegram_chat_id")
+        subprocess.run(restart, capture_output=True)
+        print("Unpaired. Jarvis will only use Mac notifications.")
+        return 0
+
+    print("1. In Telegram, open @BotFather, send /newbot, and follow the steps.")
+    token = getpass.getpass("2. Paste the bot token here (hidden): ").strip()
+    bot = Telegram(token)
+    name = bot.me()["username"]
+    secrets.delete("telegram_chat_id")  # stop the daemon polling an old pairing while we pair
+    subprocess.run(restart, capture_output=True)
+    code = f"{rnd.randbelow(10**6):06d}"
+    print(f"3. Open https://t.me/{name} and send exactly:  /start {code}\n   Waiting up to 5 minutes…")
+    offset, deadline = 0, time.time() + 300
+    while time.time() < deadline:
+        for u in bot.updates(offset, wait=25):
+            offset = u["update_id"] + 1
+            m = u.get("message") or {}
+            # only the person who sends this one-time code, in a private chat, becomes the owner
+            if (m.get("text") or "").strip() == f"/start {code}" and m["chat"]["type"] == "private":
+                secrets.put("telegram_token", token)
+                secrets.put("telegram_chat_id", str(m["chat"]["id"]))
+                bot.send(m["chat"]["id"], "Paired with Jarvis ✅ I'll message you here when I need a decision "
+                                          "or something urgent happens. Reply 'status' any time.")
+                subprocess.run(restart, capture_output=True)
+                print(f"Paired with {m['from'].get('first_name', 'you')}. Jarvis restarted.")
+                return 0
+    raise SystemExit("No pairing message arrived. Run the command again.")
+
+
 def listen() -> int:
     """Terminal push-to-talk, for testing voice without the menu bar."""
     from . import client
@@ -87,6 +135,7 @@ def main() -> None:
     for name in ("serve", "menubar", "doctor", "listen", "install", "uninstall"):
         sub.add_parser(name)
     sub.add_parser("ask").add_argument("text", nargs="+")
+    sub.add_parser("telegram").add_argument("action", choices=["setup", "test", "unpair"])
     args = p.parse_args()
 
     if args.cmd == "serve":
@@ -105,6 +154,8 @@ def main() -> None:
         sys.exit(listen())
     elif args.cmd == "install":
         sys.exit(install())
+    elif args.cmd == "telegram":
+        sys.exit(telegram(args.action))
     elif args.cmd == "uninstall":
         sys.exit(uninstall())
 

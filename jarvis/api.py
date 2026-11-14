@@ -36,7 +36,7 @@ class ActionId(BaseModel):
     id: str = Field(pattern=r"^[Aa]\d{1,6}$")
 
 
-def create_app(token: str) -> FastAPI:
+def create_app(token: str, on_bad_token=lambda: None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     hits: collections.deque[float] = collections.deque()
 
@@ -51,6 +51,7 @@ def create_app(token: str) -> FastAPI:
         # DNS rebinding and there are no CORS headers. Every /api route still needs the token.
         is_page = request.method == "GET" and request.url.path == "/"
         if not is_page and not secrets.compare_digest(request.headers.get("x-jarvis-token", ""), token):
+            on_bad_token()  # repeated failures mean something on the Mac is probing Jarvis
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         now = time.monotonic()
         while hits and now - hits[0] > 60:

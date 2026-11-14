@@ -94,6 +94,9 @@ class DocIndex:
         for i, p in enumerate(todo):
             if stop is not None and stop.is_set():
                 break
+            if not force and i % BATCH == 0 and i and on_battery_low():  # U11: stop heavy work when power runs low
+                stats["paused"] = "battery below 30% and not charging"
+                break
             result = self.index_file(p)
             stats[result] += 1
             if result == "indexed" and stats["indexed"] % BATCH == 0:

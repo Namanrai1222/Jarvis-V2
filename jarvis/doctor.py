@@ -47,8 +47,14 @@ def checks(cfg: dict) -> list[tuple[str, str, str]]:
     repo = cfg["voice"]["stt_model"].replace("/", "--")
     cached = (Path.home() / ".cache/huggingface/hub" / f"models--{repo}").exists()
     out.append((OK if cached else WARN, "Whisper speech model",
-                "downloaded" if cached else "downloads on first push-to-talk (~1.6 GB)"))
-    out.append((OK, "Microphone permission", "macOS asks on first push-to-talk"))
+                "downloaded" if cached else "downloads on first voice use (~0.5 GB)"))
+    out.append((OK, "Microphone permission", "macOS asks the first time Jarvis listens"))
+
+    from . import secrets
+
+    paired = bool(secrets.get("telegram_token") and secrets.get("telegram_chat_id"))
+    out.append((OK if paired else WARN, "Telegram alerts when away",
+                "paired" if paired else "optional: uv run jarvis telegram setup"))
 
     h = client.health() if config.TOKEN_PATH.exists() else None
     out.append((OK if h else WARN, "jarvisd running", "ready" if h else "run `jarvis install` or `jarvis serve`"))
