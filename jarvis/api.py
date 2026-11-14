@@ -1,8 +1,7 @@
-"""Local API. Every route needs the token; Host/Origin checks block DNS rebinding."""
+"""Local API guard. Every route needs the token; Host/Origin checks block DNS rebinding. Routes live in daemon.py."""
 import collections
 import secrets
 import time
-from typing import Awaitable, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -19,11 +18,11 @@ class Message(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
-def create_app(
-    token: str,
-    respond: Callable[[str], Awaitable[dict]],
-    health: Callable[[], Awaitable[dict]],
-) -> FastAPI:
+class ActionId(BaseModel):
+    id: str = Field(pattern=r"^[Aa]\d{1,6}$")
+
+
+def create_app(token: str) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     hits: collections.deque[float] = collections.deque()
 
@@ -39,17 +38,10 @@ def create_app(
         now = time.monotonic()
         while hits and now - hits[0] > 60:
             hits.popleft()
-        if len(hits) >= RATE_LIMIT:
+        # the kill switch must always get through
+        if len(hits) >= RATE_LIMIT and request.url.path != "/api/stop":
             return JSONResponse({"error": "slow down"}, status_code=429)
         hits.append(now)
         return await call_next(request)
-
-    @app.get("/api/health")
-    async def get_health():
-        return await health()
-
-    @app.post("/api/message")
-    async def post_message(msg: Message):
-        return await respond(msg.text)
 
     return app

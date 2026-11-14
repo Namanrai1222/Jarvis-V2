@@ -33,6 +33,12 @@ DEFAULTS = {
         "calendar": "com.apple.iCal",
         "reminders": "com.apple.reminders",
     },
+    "scope": {
+        "allowed_roots": ["~/Documents", "~/Downloads", "~/Desktop", "~/Pictures", "~/Jarvis"],
+    },
+    # Shortcut name -> "tier1" or "tier2"; only these can run
+    "shortcuts": {},
+    "calendar": {"default": ""},  # empty = first writable calendar
     "voice": {
         "stt_model": "mlx-community/whisper-large-v3-turbo",
         "language": "en",  # Hinglish comes out romanised, which the fast path understands

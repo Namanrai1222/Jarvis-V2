@@ -13,9 +13,21 @@ def client(timeout: float = 130) -> httpx.Client:
     )
 
 
-def ask(text: str) -> str:
+def send(text: str) -> dict:
+    """Full response: reply, source, pending actions."""
     with client() as c:
         r = c.post("/api/message", json={"text": text[:8000]})
+        r.raise_for_status()
+        return r.json()
+
+
+def ask(text: str) -> str:
+    return send(text)["reply"]
+
+
+def post(path: str, body: dict | None = None) -> str:
+    with client() as c:
+        r = c.post(path, json=body or {})
         r.raise_for_status()
         return r.json()["reply"]
 

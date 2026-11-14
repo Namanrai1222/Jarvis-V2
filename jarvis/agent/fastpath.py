@@ -1,10 +1,18 @@
-"""Instant commands that skip the LLM. Opening apps is limited to the allowlist."""
+"""Instant commands that skip the LLM. They return tool calls, which still go through the policy engine."""
 import datetime
 import re
-import subprocess
+from dataclasses import dataclass, field
 
 _OPEN_PREFIX = re.compile(r"^(?:please\s+|jarvis\s+)?(?:open|launch|start)\s+(.+)$")
 _OPEN_SUFFIX = re.compile(r"^(.+?)\s+(?:kholo|khol do|open karo|chalu karo)$")  # Hinglish
+_SEARCH = re.compile(r"^(?:search(?:\s+for)?|google)\s+(.+)$|^(.+?)\s+(?:search karo|google karo)$")
+_SITE = re.compile(r"^[\w.-]+\.[a-z]{2,}(/\S*)?$")
+
+
+@dataclass
+class Fast:
+    calls: list[tuple[str, dict]] = field(default_factory=list)
+    reply: str = ""
 
 
 def _clean(text: str) -> str:
@@ -24,31 +32,26 @@ def parse_open(text: str, apps: dict[str, str]) -> tuple[list[str], list[str]] |
     return bundles, unknown
 
 
-def _battery() -> str:
-    out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
-    m = re.search(r"(\d+)%;\s*([\w ]+);", out)
-    return f"Battery is at {m.group(1)} percent, {m.group(2)}." if m else "I couldn't read the battery."
-
-
-def try_fastpath(text: str, apps: dict[str, str]) -> str | None:
-    parsed = parse_open(text, apps)
-    if parsed is not None:
-        bundles, unknown = parsed
-        for b in dict.fromkeys(bundles):
-            subprocess.run(["open", "-b", b], check=False)
-        parts = []
-        if bundles:
-            parts.append("Opening.")
-        if unknown:
-            parts.append(f"{', '.join(unknown)} isn't in my allowed apps.")
-        return " ".join(parts)
-
+def match(text: str, cfg: dict) -> Fast | None:
     t = _clean(text)
+
+    m = _OPEN_PREFIX.match(t)
+    if m and _SITE.match(m.group(1)):
+        return Fast([("open_url", {"url": m.group(1)})])
+
+    m = _SEARCH.match(t)
+    if m:
+        return Fast([("web_search", {"query": m.group(1) or m.group(2)})])
+
+    parsed = parse_open(text, cfg["apps"])
+    if parsed is not None and parsed[0] and not parsed[1]:  # anything unrecognised goes to the LLM
+        return Fast([("open_app", {"app": b}) for b in dict.fromkeys(parsed[0])])
+
     now = datetime.datetime.now()
-    if re.search(r"\btime\b", t) and re.search(r"what|kya|tell", t):
-        return f"It's {now.strftime('%-I:%M %p')}."
+    if re.search(r"\btime\b", t) and re.search(r"what|kya|tell|kitne", t):
+        return Fast(reply=f"It's {now.strftime('%-I:%M %p')}.")
     if re.search(r"\b(date|day)\b", t) and re.search(r"what|kya|today|aaj", t):
-        return f"Today is {now.strftime('%A, %-d %B')}."
-    if "battery" in t:
-        return _battery()
+        return Fast(reply=f"Today is {now.strftime('%A, %-d %B')}.")
+    if re.search(r"\bbattery\b|\bdisk space\b", t):
+        return Fast([("system_status", {})])
     return None

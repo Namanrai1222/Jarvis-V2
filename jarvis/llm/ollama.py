@@ -3,27 +3,35 @@ import httpx
 
 from ..config import OLLAMA_URL
 
-SYSTEM = (
-    "You are Jarvis, Naman's private assistant running locally on his MacBook. "
+CHAT_SYSTEM = (
+    "You are Jarvis, Naman's private assistant running locally on a MacBook. "
     "Reply in one to three short sentences that sound natural when spoken aloud. "
-    "You understand English and Hinglish. You cannot take actions on the Mac yet, "
-    "so never claim you did something; say what Naman can do instead."
+    "You understand English and Hinglish."
 )
 
 
-async def chat(model: str, text: str) -> str:
+async def chat_message(model: str, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    """One chat turn; returns the assistant message (may contain tool_calls)."""
+    body = {"model": model, "messages": messages, "stream": False, "think": False}
+    if tools:
+        body["tools"] = tools
     async with httpx.AsyncClient(base_url=OLLAMA_URL, timeout=120) as c:
-        r = await c.post(
-            "/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}],
-                "stream": False,
-                "think": False,
-            },
-        )
+        r = await c.post("/api/chat", json=body)
         r.raise_for_status()
-        return r.json()["message"]["content"].strip()
+        return r.json()["message"]
+
+
+async def chat(model: str, text: str) -> str:
+    msg = await chat_message(model, [{"role": "system", "content": CHAT_SYSTEM}, {"role": "user", "content": text}])
+    return msg["content"].strip()
+
+
+async def unload(model: str) -> None:
+    try:
+        async with httpx.AsyncClient(base_url=OLLAMA_URL, timeout=10) as c:
+            await c.post("/api/generate", json={"model": model, "keep_alive": 0})
+    except httpx.HTTPError:
+        pass
 
 
 def installed_models() -> set[str] | None:
