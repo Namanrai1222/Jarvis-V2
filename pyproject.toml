@@ -1,0 +1,28 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Private local assistant for macOS"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "httpx>=0.27",
+  "rumps>=0.4",
+  "quickmachotkey>=2023.11",
+  "mlx-whisper>=0.4",
+  "sounddevice>=0.5",
+  "numpy>=2",
+]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jarvis"]

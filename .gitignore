@@ -1,0 +1,9 @@
+.DS_Store
+.venv/
+__pycache__/
+data/
+*.db
+*.sock
+.env*
+.pytest_cache/
+docs/
