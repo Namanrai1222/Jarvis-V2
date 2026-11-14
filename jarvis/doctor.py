@@ -50,6 +50,18 @@ def checks(cfg: dict) -> list[tuple[str, str, str]]:
                 "downloaded" if cached else "downloads on first voice use (~0.5 GB)"))
     out.append((OK, "Microphone permission", "macOS asks the first time Jarvis listens"))
 
+    if models is not None and config.MODELS_LOCK.exists():
+        import json
+
+        locked = json.loads(config.MODELS_LOCK.read_text())
+        current = ollama.model_digests()
+        changed = [n for n, d in locked.items() if n in current and current[n] != d]
+        out.append((FAIL if changed else OK, "Models match models.lock",
+                    f"changed: {', '.join(changed)} (re-pull or run `jarvis lock-models` if you updated on purpose)"
+                    if changed else f"{len(locked)} digests verified"))
+    elif models is not None:
+        out.append((WARN, "Models match models.lock", "no lock yet: run `uv run jarvis lock-models`"))
+
     from . import secrets
 
     paired = bool(secrets.get("telegram_token") and secrets.get("telegram_chat_id"))

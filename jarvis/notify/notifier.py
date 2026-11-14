@@ -26,12 +26,13 @@ class Notifier:
         self.later: list[tuple[float, str, str, list | None]] = []  # (due, key, text, buttons)
 
     def notify(self, text: str, urgency: str = "normal", buttons: list | None = None, key: str = "") -> None:
-        """urgency: normal | high | decision | critical. Secrets are redacted before anything leaves."""
+        """urgency: normal | high | decision | critical | brief (always to the phone, outside quiet hours).
+        Secrets are redacted before anything leaves."""
         text, _ = redact(text)
         self.mac(text)
         if self.remote is None:
             return
-        if urgency == "critical" or not self.present():
+        if urgency in ("critical", "brief") or not self.present():
             self._send(text, buttons, force=urgency == "critical")
         elif urgency == "decision":
             self.later.append((self.clock() + ESCALATE_AFTER, key, text, buttons))

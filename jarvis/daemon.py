@@ -1,5 +1,6 @@
 """jarvisd: wires the agent together and serves the API on 127.0.0.1 (browser) and a Unix socket (CLI, menu bar)."""
 import asyncio
+import datetime
 import itertools
 import re
 import time
@@ -11,9 +12,9 @@ import uvicorn
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from . import config, secrets
+from . import config, day, secrets
 from .activity import Activity
-from .agent import context, fastpath, planner
+from .agent import context, fastpath, guard, planner
 from .agent.executor import Executor
 from .api import ActionId, Forget, MemoryId, Message, Pin, create_app
 from .llm import ollama
@@ -33,6 +34,11 @@ INBOX = Path.home() / "Jarvis/Inbox"
 _CONFIRM = re.compile(r"^(?:confirm|yes|haan|ha|ok|do it|kar do)(?:\s+(a\d+))?$")
 _CANCEL = re.compile(r"^(?:cancel|no|nahi|mat karo)(?:\s+(a\d+))?$")
 _REMOTE_ANSWER = re.compile(r"^(a\d+)\s+(yes|y|ok|confirm|haan|ha|no|n|cancel|nahi|skip|stop)$")
+_DAY_SUMMARY = re.compile(
+    r"(summar\w*|recap|wrap[- ]?up|report)\b.{0,40}\b(day|today|aaj|din|work)\b|"
+    r"\b(day|aaj|din)\b.{0,15}\b(summar\w*|recap|report)|^what (did|have) i (do|done|work(ed)? on) today|"
+    r"\bend of (the )?day\b", re.I)
+_BRIEF = re.compile(r"\b(daily|morning) brief\b|^brief( me)?$|aaj ka plan", re.I)
 PHONE_TTL = 3600  # a decision sent to the phone gets an hour to be answered (DESIGN §9.4)
 
 
@@ -62,6 +68,7 @@ class Jarvis:
                                  remote=(lambda text, buttons: self.telegram.send(self.chat_id, text, buttons))
                                  if self.telegram else None)
         self.bad_tokens: list[float] = []
+        self.apps = day.AppTracker(str(config.APP_DIR / "jarvis.db")) if cfg["day"]["track_apps"] else None
         self.activity = Activity(str(config.APP_DIR / "jarvis.db"))
         self.memory = MemoryStore(str(config.APP_DIR / "jarvis.db"))
         embed_model = cfg["models"]["embed"]
@@ -82,6 +89,61 @@ class Jarvis:
     def _still_open(self, pid: str) -> bool:
         """Notifier asks before escalating; escalated decisions get the phone's longer expiry."""
         return self.pending.extend(pid, PHONE_TTL)
+
+    def _injection(self, source: str, rid: str) -> None:
+        """U12: log it and alert Naman, naming the file but never quoting it."""
+        self.activity.log(request_id=rid, tool="guard", args={"source": source}, tier=None, tainted=True,
+                          decision="blocked injection", result=f"suspicious passage hidden from the model ({source})")
+        self.notifier.notify(f"Security: I blocked text in {source} that tried to give me instructions. "
+                             "Nothing was done because of it.", "critical")
+
+    # --- your day (M6) ---
+    def _events(self, start: datetime.date) -> str:
+        from .tools import REGISTRY
+
+        end = start + datetime.timedelta(days=1)
+        try:
+            return REGISTRY["list_events"].run({"start": f"{start}T00:00", "end": f"{end}T00:00"}, self.cfg).text
+        except Exception:
+            return ""
+
+    async def day_summary(self) -> str:
+        """End-of-day summary of work on the laptop, written by the main brain from gathered facts."""
+        events = await asyncio.to_thread(self._events, datetime.date.today())
+        data = await asyncio.to_thread(day.gather, self.cfg, self.apps, self.memory, self.activity, events)
+        facts = day.as_text(data)
+        model = self.cfg["models"]["main"]
+        if not data["apps"] and not data["files"] and not data["commits"] and not data["said"]:
+            return facts
+        try:
+            if model not in (await asyncio.to_thread(ollama.installed_models) or set()):
+                raise httpx.HTTPError("main model missing")
+            msg = await ollama.chat_message(model, [
+                {"role": "system", "content": day.SUMMARY_PROMPT},
+                {"role": "user", "content": f"<untrusted source=\"laptop activity\">\n{facts}\n</untrusted>"}])
+            return guard.check_output(_clean(msg["content"]), set())
+        except httpx.HTTPError:
+            return facts  # model unavailable: the plain list is still useful
+
+    def brief(self) -> str:
+        """Morning brief: today's calendar, reminders due today, approvals waiting (no model needed)."""
+        from .tools import REGISTRY
+
+        today = datetime.date.today()
+        events = self._events(today)
+        try:
+            reminders = REGISTRY["list_reminders"].run({}, self.cfg).text
+        except Exception:
+            reminders = ""
+        due = [line for line in reminders.splitlines() if today.strftime("%a %b %d %Y") in line]
+        waiting = self.pending.list()
+        parts = [f"Good morning! {today.strftime('%A, %-d %B')}."]
+        parts.append("Calendar:\n" + events if events and events != "No events." else "No meetings today.")
+        if due:
+            parts.append("Due today:\n" + "\n".join(f"- {d.split(' (due')[0]}" for d in due))
+        if waiting:
+            parts.append("Waiting for your OK: " + "; ".join(f"{p.id}: {p.summary}" for p in waiting))
+        return "\n\n".join(parts)
 
     def bad_token(self) -> None:
         now = time.time()
@@ -176,6 +238,10 @@ class Jarvis:
             return {"reply": await self.stop(), "source": "control", "pending": []}
         if (reply := await asyncio.to_thread(self._control, t)) is not None:
             return {"reply": reply, "source": "control", "pending": self._pending_public()}
+        if _DAY_SUMMARY.search(t):
+            return {"reply": await self.day_summary(), "source": "day", "pending": []}
+        if _BRIEF.search(t):
+            return {"reply": await asyncio.to_thread(self.brief), "source": "day", "pending": []}
         if (reply := await asyncio.to_thread(self._remember, text)) is not None:
             return {"reply": reply, "source": "memory", "pending": []}
 
@@ -224,8 +290,10 @@ class Jarvis:
             if router in models and model != router and not await ollama.needs_tools(router, text):
                 return {"reply": _clean(await ollama.chat(router, text, memory)), "source": "quick", "pending": [],
                         "tainted": mem_tainted}
+            classify = (lambda passage: ollama.is_injection(router, passage)) if router in models else None
             out = await planner.plan(text, chat=chat, executor=self.executor, cfg=self.cfg, request_id=rid,
-                                     memory=memory, tainted=mem_tainted)
+                                     memory=memory, tainted=mem_tainted, classify=classify,
+                                     on_injection=lambda source: self._injection(source, rid))
         except httpx.HTTPError:
             return {"reply": "My language model stopped responding.", "source": "offline", "pending": []}
         # Small models often claim a pending action is already done, so when something waits for
@@ -376,6 +444,8 @@ async def purge_loop(j: Jarvis) -> None:
             try:
                 await asyncio.to_thread(j.memory.purge, None, (("activity", "ts"),))
                 await asyncio.to_thread(_clean_jarvis_files, time.time())
+                if j.apps:
+                    await asyncio.to_thread(j.apps.prune)
             except Exception as e:  # never crash the daemon over a purge; it retries next hour
                 print(f"memory purge failed: {e}", flush=True)
                 j.notifier.notify(f"Memory purge failed: {e}. I'll retry within the hour.", "normal")
@@ -387,6 +457,9 @@ async def notify_loop(j: Jarvis) -> None:
     warned: set[str] = set()
     for n in itertools.count():
         await asyncio.to_thread(j.notifier.tick, j._still_open)
+        if j.apps and n % 2 == 0:
+            await asyncio.to_thread(j.apps.sample)  # once a minute: which app is in front (names only)
+        await _maybe_brief(j)
         if n % 10 == 0:
             for key, problem in (await asyncio.to_thread(_power_and_disk)).items():
                 if problem and key not in warned:
@@ -395,6 +468,18 @@ async def notify_loop(j: Jarvis) -> None:
                 elif not problem:
                     warned.discard(key)
         await asyncio.sleep(30)
+
+
+async def _maybe_brief(j: Jarvis) -> None:
+    """Send the morning brief once a day, at or after the configured time (catches up after sleep)."""
+    at = j.cfg["day"]["daily_brief"]
+    if not at:
+        return
+    now = datetime.datetime.now()
+    if now.time() < datetime.time.fromisoformat(at) or j.memory.meta("last_brief") == now.date().isoformat():
+        return
+    j.memory.meta("last_brief", now.date().isoformat())
+    j.notifier.notify(await asyncio.to_thread(j.brief), "brief")
 
 
 def _power_and_disk() -> dict[str, str]:

@@ -11,6 +11,7 @@ TOKEN_PATH = APP_DIR / "token"
 SOCK_PATH = APP_DIR / "jarvis.sock"
 LOG_DIR = APP_DIR / "logs"
 PORT = 8765
+MODELS_LOCK = Path(__file__).resolve().parents[1] / "models.lock"  # checked by `jarvis doctor`
 OLLAMA_URL = "http://127.0.0.1:11434"
 
 DEFAULTS = {
@@ -47,6 +48,10 @@ DEFAULTS = {
         "quiet_hours": ["23:30", "07:30"],   # only critical alerts reach your phone in this window
         "max_per_hour": 6,
         "away_after_min": 10,
+    },
+    "day": {
+        "daily_brief": "08:30",   # morning brief time; "" turns it off
+        "track_apps": True,       # count minutes per app for "summarise my day" (names only, 14 days)
     },
     "voice": {
         # 4-bit Turbo: same accuracy class, 464 MB instead of 1.6 GB, so it fits beside the 8B model

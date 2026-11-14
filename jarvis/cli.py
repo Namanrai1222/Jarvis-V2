@@ -110,6 +110,19 @@ def telegram(action: str) -> int:
     raise SystemExit("No pairing message arrived. Run the command again.")
 
 
+def lock_models() -> int:
+    """Record the digest of every configured model; `jarvis doctor` fails if one changes later."""
+    import json
+
+    from .llm import ollama
+
+    wanted = set(config.load()["models"].values())
+    digests = {n: d for n, d in sorted(ollama.model_digests().items()) if n in wanted}
+    config.MODELS_LOCK.write_text(json.dumps(digests, indent=2) + "\n")
+    print(f"locked {len(digests)} models in {config.MODELS_LOCK}")
+    return 0
+
+
 def listen() -> int:
     """Terminal push-to-talk, for testing voice without the menu bar."""
     from . import client
@@ -132,7 +145,7 @@ def listen() -> int:
 def main() -> None:
     p = argparse.ArgumentParser(prog="jarvis")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("serve", "menubar", "doctor", "listen", "install", "uninstall"):
+    for name in ("serve", "menubar", "doctor", "listen", "install", "uninstall", "lock-models"):
         sub.add_parser(name)
     sub.add_parser("ask").add_argument("text", nargs="+")
     sub.add_parser("telegram").add_argument("action", choices=["setup", "test", "unpair"])
@@ -154,6 +167,8 @@ def main() -> None:
         sys.exit(listen())
     elif args.cmd == "install":
         sys.exit(install())
+    elif args.cmd == "lock-models":
+        sys.exit(lock_models())
     elif args.cmd == "telegram":
         sys.exit(telegram(args.action))
     elif args.cmd == "uninstall":

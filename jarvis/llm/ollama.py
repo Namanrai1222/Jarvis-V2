@@ -99,6 +99,25 @@ def describe_image(model: str, png: bytes, question: str) -> str:
     return r.json()["message"]["content"].strip()
 
 
+def is_injection(model: str, text: str) -> bool:
+    """Small-model second opinion on a passage that looks like instructions (sync, worker threads)."""
+    from ..agent.guard import CLASSIFIER_PROMPT
+
+    body = {"model": model, "stream": False, "think": False, "options": {"temperature": 0, "num_predict": 20},
+            "messages": [{"role": "system", "content": CLASSIFIER_PROMPT}, {"role": "user", "content": text}],
+            "format": {"type": "object", "properties": {"injection": {"type": "boolean"}}, "required": ["injection"]}}
+    r = httpx.post(f"{OLLAMA_URL}/api/chat", json=body, timeout=60)
+    r.raise_for_status()
+    return bool(json.loads(r.json()["message"]["content"]).get("injection"))
+
+
+def model_digests() -> dict[str, str]:
+    """name -> sha256 digest of each installed model (for models.lock)."""
+    r = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+    r.raise_for_status()
+    return {m["name"]: m["digest"] for m in r.json().get("models", [])}
+
+
 def installed_models() -> set[str] | None:
     """Model names Ollama has, or None if Ollama isn't reachable."""
     try:

@@ -175,6 +175,15 @@ class MemoryStore:
             self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return n
 
+    def meta(self, key: str, value: str | None = None) -> str | None:
+        """Read (value=None) or write a small setting such as the last daily-brief date."""
+        with self._lock:
+            if value is not None:
+                self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+                return value
+            row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
     def _size(self) -> int:
         page = self._db.execute("PRAGMA page_count").fetchone()[0]
         return page * self._db.execute("PRAGMA page_size").fetchone()[0]

@@ -126,6 +126,8 @@
       <button class="stop" id="stop" title="Cancel everything and pause">Stop everything</button>
       <button id="pause">Pause</button>
       <button id="undo">Undo last</button>
+      <button id="daybtn">Summarise my day</button>
+      <button id="briefbtn">Daily brief</button>
     </div>
 
     <h2>Needs your OK</h2>
@@ -172,7 +174,7 @@ function addMsg(text, who, src) {
   return m;
 }
 
-const SRC = { fastpath: "instant", quick: "quick brain", llm: "thought it through", memory: "memory",
+const SRC = { fastpath: "instant", quick: "quick brain", llm: "thought it through", memory: "memory", day: "your day",
               control: "control", offline: "model offline", timeout: "timed out" };
 
 async function send(text) {
@@ -268,6 +270,8 @@ document.addEventListener("keydown", (e) => {
 });
 $("stop").onclick = async () => { const o = await api("/api/stop", {}); addMsg(o.reply, "jarvis", "control"); refresh(); };
 $("pause").onclick = () => send(paused ? "resume" : "pause");
+$("daybtn").onclick = () => { showTab(false); send("summarise my day"); };
+$("briefbtn").onclick = () => { showTab(false); send("daily brief"); };
 $("undo").onclick = async () => { const o = await api("/api/undo", {}); addMsg(o.reply, "jarvis", "control"); refresh(); };
 
 // --- Memory tab ---

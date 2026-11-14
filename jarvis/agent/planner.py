@@ -2,11 +2,13 @@
 import asyncio
 import datetime
 import json
+import re
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from ..policy.pending import Pending
 from ..tools import REGISTRY
+from . import guard
 from .executor import Executor, UnknownTool
 
 MAX_STEPS = 8
@@ -32,8 +34,13 @@ def _wrap_untrusted(source: str, text: str) -> str:
 
 
 async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, request_id: str,
-               memory: str = "", tainted: bool = False) -> dict:
-    """Returns {reply, pending, tainted}. Memory that was itself tainted starts the request tainted."""
+               memory: str = "", tainted: bool = False, classify: guard.Classifier | None = None,
+               on_injection: Callable[[str], None] = lambda source: None) -> dict:
+    """Returns {reply, pending, tainted}. Memory that was itself tainted starts the request tainted.
+
+    Untrusted tool output is screened for injection before the model sees it (suspicious passages hidden,
+    on_injection(source) called); the final reply may only cite files read during this request."""
+    read_files: set[str] = set()
     system = system_prompt(cfg) + (f"\n\n{memory}" if memory else "")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": text}]
     schemas = [t.schema() for t in REGISTRY.values()]
@@ -44,7 +51,8 @@ async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, reques
         calls = msg.get("tool_calls") or []
         messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": calls})
         if not calls:
-            return {"reply": msg.get("content", "").strip() or "Done.", "pending": pending, "tainted": tainted}
+            reply = guard.check_output(msg.get("content", "").strip() or "Done.", read_files)
+            return {"reply": reply, "pending": pending, "tainted": tainted}
         for call in calls:
             fn = call.get("function", {})
             name, args = fn.get("name", ""), fn.get("arguments") or {}
@@ -68,6 +76,13 @@ async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, reques
             tool = REGISTRY.get(name)
             if tool is not None and tool.untrusted_output:
                 tainted = True
+                source = Path(str(args.get("path", ""))).name if isinstance(args, dict) and args.get("path") else name
+                read_files.update(n.lower() for n in re.findall(r"\[([^\[\]·\n]+?)(?: · p\. \d+)?\]", result))
+                if source != name:
+                    read_files.add(source.lower())
+                result, hidden = await asyncio.to_thread(guard.screen, result, classify)
+                if hidden:
+                    on_injection(source)
                 result = _wrap_untrusted(name, result)
             messages.append({"role": "tool", "content": result, "tool_name": name})
     return {"reply": "I stopped after 8 steps. Here's where things stand; ask me to continue if needed.",
