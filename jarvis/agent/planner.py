@@ -75,4 +75,4 @@ def describe_pending(pending: list[Pending]) -> str:
     if not pending:
         return ""
     items = "; ".join(f"{p.id}: {p.summary}" for p in pending)
-    return f" Needs your OK, {items}. Say confirm or cancel."
+    return f" Nothing changed yet. Needs your OK, {items}. Say confirm or cancel."

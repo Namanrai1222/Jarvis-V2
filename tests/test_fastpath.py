@@ -26,5 +26,10 @@ def test_time(cfg):
     assert fastpath.match("what time is it?", cfg).reply.startswith("It's ")
 
 
+def test_compound_request_goes_to_llm(cfg):
+    assert fastpath.match("open youtube.com and tell me the battery", cfg) is None
+    assert fastpath.match("battery kitna hai", cfg).calls == [("system_status", {})]
+
+
 def test_falls_through_to_llm(cfg):
     assert fastpath.match("tell me a joke", cfg) is None

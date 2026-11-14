@@ -62,6 +62,20 @@ def test_rate_limit_but_kill_switch_still_works():
     assert c.post("/api/stop", headers=h).status_code == 200
 
 
+def test_dashboard_page_needs_right_host_only():
+    app_client = make()
+
+    @app_client.app.get("/")
+    async def page():
+        return {"page": True}
+
+    assert app_client.get("/").status_code == 200
+    assert app_client.get("/api/health").status_code == 401  # API still needs the token
+    evil = TestClient(app_client.app, base_url="http://evil.example:8765")
+    assert evil.get("/").status_code == 421
+    assert app_client.get("/").headers["x-frame-options"] == "DENY"
+
+
 def test_no_cors_headers():
     c = make()
     r = c.get("/api/health", headers={"X-Jarvis-Token": TOKEN, "Origin": "http://127.0.0.1:8765"})

@@ -2,9 +2,11 @@
 import asyncio
 import re
 import uuid
+from pathlib import Path
 
 import httpx
 import uvicorn
+from fastapi.responses import HTMLResponse
 
 from . import config
 from .activity import Activity
@@ -105,7 +107,10 @@ class Jarvis:
             out = await planner.plan(text, chat=chat, executor=self.executor, cfg=self.cfg, request_id=rid)
         except httpx.HTTPError:
             return {"reply": "My language model stopped responding.", "source": "offline", "pending": []}
-        return {"reply": out["reply"] + planner.describe_pending(out["pending"]), "source": "llm",
+        # Small models often claim a pending action is already done, so when something waits for
+        # approval the reply is ours, not the model's.
+        reply = planner.describe_pending(out["pending"]).strip() if out["pending"] else out["reply"]
+        return {"reply": reply, "source": "llm",
                 "pending": [p.public() for p in out["pending"]]}
 
     def _pending_public(self) -> list[dict]:
@@ -137,7 +142,13 @@ class Jarvis:
 def build_app():
     config.ensure_app_dir()
     j = Jarvis(config.load())
-    app = create_app(config.new_token())
+    token = config.new_token()
+    app = create_app(token)
+    page = (Path(__file__).parent / "ui/index.html").read_text().replace("__JARVIS_TOKEN__", token)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index():
+        return page
 
     @app.get("/api/health")
     async def health():

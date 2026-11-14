@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c1e22; --muted: #6b7180; --line: #e3e6eb;
+    --accent: #2f5bd3; --accent-ink: #fff; --amber: #c27a00; --amber-bg: #fff7e8; --danger: #c43d3d;
+    --me: #eef2fc; --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15171b; --panel: #1d2026; --ink: #e8eaee; --muted: #9096a3; --line: #2c3038;
+            --accent: #6d8ff0; --accent-ink: #0d1020; --amber: #e3a53c; --amber-bg: #2b2414; --danger: #e06666; --me: #232a3a; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); padding: 6px 12px; }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.stop { color: var(--danger); border-color: var(--danger); font-weight: 600; }
+  .app { display: grid; grid-template-columns: 1fr 340px; height: 100vh; }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; }
+  .status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted); }
+  .dot.ready { border-color: #2e9e5b; } .dot.paused { background: var(--amber); border-color: var(--amber); }
+  .dot.offline { border-style: dashed; }
+  header .spacer { flex: 1; }
+  main { display: flex; flex-direction: column; min-height: 0; }
+  #log { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 75%; padding: 9px 13px; border-radius: var(--radius); background: var(--panel);
+         border: 1px solid var(--line); white-space: pre-wrap; word-wrap: break-word; }
+  .msg.me { align-self: flex-end; background: var(--me); border-color: transparent; }
+  .msg .src { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .msg.thinking { color: var(--muted); font-style: italic; }
+  .empty { color: var(--muted); margin: auto; text-align: center; max-width: 360px; }
+  .empty b { color: var(--ink); }
+  form { display: flex; gap: 8px; padding: 12px 18px 18px; }
+  textarea { flex: 1; resize: none; height: 44px; padding: 11px 12px; border-radius: var(--radius);
+             border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 14px 16px; }
+  aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 16px 0 8px; }
+  aside h2:first-child { margin-top: 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; }
+  .card { border: 1px solid var(--amber); background: var(--amber-bg); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px; }
+  .card .id { font-weight: 700; margin-right: 4px; }
+  .card .taint { display: block; font-size: 12px; color: var(--amber); margin-top: 4px; }
+  .card .row { display: flex; gap: 6px; margin-top: 8px; }
+  .none { color: var(--muted); font-size: 13px; }
+  .act { font-size: 12.5px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .act .top { display: flex; justify-content: space-between; gap: 8px; }
+  .act .tool { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+  .act .res { color: var(--muted); }
+  .tag { font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--line); white-space: nowrap; }
+  .tag.run { color: #2e9e5b; } .tag.block { color: var(--danger); } .tag.pending { color: var(--amber); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 14px; }
+  kbd { font-family: inherit; font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; height: auto; }
+    main { height: 70vh; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+    .msg { max-width: 90%; }
+  }
+  @media (prefers-reduced-motion: no-preference) { #log { scroll-behavior: smooth; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <main>
+    <header>
+      <h1>Jarvis</h1>
+      <span class="status"><span class="dot" id="dot"></span><span id="state">Connecting…</span></span>
+      <span class="spacer"></span>
+    </header>
+    <div id="log" aria-live="polite">
+      <div class="empty" id="empty">
+        <p><b>Ask Jarvis anything.</b></p>
+        <p>Try “open chrome and notes”, “what's on my calendar tomorrow?”, or “move the PDFs in Downloads to Documents/College”.</p>
+      </div>
+    </div>
+    <form id="form">
+      <textarea id="input" placeholder="Message Jarvis…  (Enter to send)" aria-label="Message" maxlength="8000"></textarea>
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </main>
+
+  <aside>
+    <h2>Controls</h2>
+    <div class="controls">
+      <button class="stop" id="stop" title="Cancel everything and pause">Stop everything</button>
+      <button id="pause">Pause</button>
+      <button id="undo">Undo last</button>
+    </div>
+
+    <h2>Needs your OK</h2>
+    <div id="pending"><p class="none">Nothing waiting.</p></div>
+
+    <h2>Activity</h2>
+    <div id="activity"><p class="none">No actions yet.</p></div>
+
+    <p class="hint"><kbd>⌘</kbd> <kbd>Enter</kbd> confirms the newest request · <kbd>Esc</kbd> cancels it</p>
+  </aside>
+</div>
+
+<script>
+const TOKEN = "__JARVIS_TOKEN__";
+const $ = (id) => document.getElementById(id);
+let paused = false, pendingItems = [];
+
+async function api(path, body) {
+  const opts = { headers: { "X-Jarvis-Token": TOKEN } };
+  if (body !== undefined) {
+    opts.method = "POST";
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  if (r.status === 401) throw new Error("Jarvis restarted. Reload this page.");
+  if (!r.ok) throw new Error(`Error ${r.status}`);
+  return r.json();
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;  // textContent only: replies may quote file contents
+  return e;
+}
+
+function addMsg(text, who, src) {
+  $("empty")?.remove();
+  const m = el("div", "msg " + who, text);
+  if (src) m.appendChild(el("span", "src", src));
+  $("log").appendChild(m);
+  $("log").scrollTop = $("log").scrollHeight;
+  return m;
+}
+
+const SRC = { fastpath: "instant", llm: "thought it through", control: "control", offline: "model offline", timeout: "timed out" };
+
+async function send(text) {
+  addMsg(text, "me");
+  const thinking = addMsg("Thinking…", "thinking");
+  try {
+    const out = await api("/api/message", { text });
+    thinking.remove();
+    addMsg(out.reply, "jarvis", SRC[out.source] || out.source);
+  } catch (e) {
+    thinking.remove();
+    addMsg(e.message, "jarvis");
+  }
+  refresh();
+}
+
+function renderPending(items) {
+  pendingItems = items;
+  const box = $("pending");
+  box.replaceChildren();
+  if (!items.length) { box.appendChild(el("p", "none", "Nothing waiting.")); return; }
+  for (const p of items) {
+    const c = el("div", "card");
+    c.appendChild(el("span", "id", p.id));
+    c.appendChild(document.createTextNode(p.summary));
+    if (p.tainted) c.appendChild(el("span", "taint", "Suggested after reading a file or app content."));
+    const row = el("div", "row");
+    const ok = el("button", "primary", "Confirm");
+    const no = el("button", "", "Cancel");
+    ok.onclick = () => decide(p.id, true);
+    no.onclick = () => decide(p.id, false);
+    row.append(ok, no);
+    c.appendChild(row);
+    box.appendChild(c);
+  }
+}
+
+async function decide(id, yes) {
+  try {
+    const out = await api(yes ? "/api/confirm" : "/api/cancel", { id });
+    addMsg(out.reply, "jarvis", yes ? "confirmed " + id : "cancelled " + id);
+  } catch (e) { addMsg(e.message, "jarvis"); }
+  refresh();
+}
+
+function renderActivity(rows) {
+  const box = $("activity");
+  box.replaceChildren();
+  if (!rows.length) { box.appendChild(el("p", "none", "No actions yet.")); return; }
+  for (const r of rows.slice(0, 25)) {
+    const a = el("div", "act");
+    const top = el("div", "top");
+    top.appendChild(el("span", "tool", r.tool));
+    const kind = r.decision.split(" ")[0] === "cancelled" ? "block" : r.decision.startsWith("pending") ? "pending" : r.decision;
+    const t = new Date(r.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    top.appendChild(el("span", "tag " + kind, `${r.decision}${r.undone ? " · undone" : ""} · ${t}`));
+    a.appendChild(top);
+    if (r.result) a.appendChild(el("div", "res", r.result.slice(0, 160)));
+    box.appendChild(a);
+  }
+}
+
+async function refresh() {
+  try {
+    const [h, p, act] = await Promise.all([api("/api/health"), api("/api/pending"), api("/api/activity")]);
+    paused = h.status === "paused";
+    $("dot").className = "dot " + (paused ? "paused" : h.llm ? "ready" : "offline");
+    $("state").textContent = paused ? "Paused" : h.llm ? "Ready" : "Model offline";
+    $("pause").textContent = paused ? "Resume" : "Pause";
+    renderPending(p);
+    renderActivity(act);
+  } catch (e) {
+    $("dot").className = "dot offline";
+    $("state").textContent = e.message.includes("Reload") ? e.message : "Can't reach Jarvis";
+  }
+}
+
+$("form").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("input").value.trim();
+  if (!text) return;
+  $("input").value = "";
+  send(text);
+};
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.metaKey) { e.preventDefault(); $("form").requestSubmit(); }
+});
+document.addEventListener("keydown", (e) => {
+  const newest = pendingItems[pendingItems.length - 1];
+  if (!newest) return;
+  if (e.key === "Enter" && e.metaKey) { e.preventDefault(); decide(newest.id, true); }
+  if (e.key === "Escape") decide(newest.id, false);
+});
+$("stop").onclick = async () => { const o = await api("/api/stop", {}); addMsg(o.reply, "jarvis", "control"); refresh(); };
+$("pause").onclick = () => send(paused ? "resume" : "pause");
+$("undo").onclick = async () => { const o = await api("/api/undo", {}); addMsg(o.reply, "jarvis", "control"); refresh(); };
+
+refresh();
+setInterval(refresh, 15000);
+$("input").focus();
+</script>
+</body>
+</html>

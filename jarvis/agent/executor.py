@@ -61,7 +61,11 @@ class Executor:
 
     def cancel(self, pid: str) -> str:
         p = self.pending.pop(pid)
-        return f"Cancelled {p.id}." if p else f"There's no pending action {pid.upper()}."
+        if p is None:
+            return f"There's no pending action {pid.upper()}."
+        self.activity.log(request_id=p.request_id, tool=p.tool, args=p.args, tier=None, tainted=p.tainted,
+                          decision=f"cancelled {p.id}", result=p.summary)
+        return f"Cancelled {p.id}."
 
     def undo_last(self) -> str:
         row = self.activity.last_undoable()

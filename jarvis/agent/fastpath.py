@@ -47,6 +47,8 @@ def match(text: str, cfg: dict) -> Fast | None:
     if parsed is not None and parsed[0] and not parsed[1]:  # anything unrecognised goes to the LLM
         return Fast([("open_app", {"app": b}) for b in dict.fromkeys(parsed[0])])
 
+    if re.search(r"\b(and|aur|then|phir|also)\b", t):  # compound request: let the planner do every part
+        return None
     now = datetime.datetime.now()
     if re.search(r"\btime\b", t) and re.search(r"what|kya|tell|kitne", t):
         return Fast(reply=f"It's {now.strftime('%-I:%M %p')}.")
