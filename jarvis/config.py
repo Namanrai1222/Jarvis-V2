@@ -18,6 +18,7 @@ DEFAULTS = {
         "router": "qwen3:1.7b",
         "main": "qwen3:8b",
         "embed": "qwen3-embedding:0.6b",
+        "vision": "gemma3:4b",
     },
     # spoken name -> bundle ID; only these can be opened
     "apps": {
@@ -39,6 +40,9 @@ DEFAULTS = {
     # Shortcut name -> "tier1" or "tier2"; only these can run
     "shortcuts": {},
     "calendar": {"default": ""},  # empty = first writable calendar
+    # folders whose documents are indexed for search (must be inside allowed_roots)
+    # include_code: also index source files (off: big projects take long to embed on a laptop)
+    "documents": {"index_folders": ["~/Documents/College", "~/Documents/Projects"], "include_code": False},
     "voice": {
         "stt_model": "mlx-community/whisper-large-v3-turbo",
         "language": "en",  # Hinglish comes out romanised, which the fast path understands

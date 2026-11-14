@@ -7,9 +7,10 @@ import time
 from pathlib import Path
 
 from ..policy.paths import PolicyError, display, resolve
+from ..documents import extract
 from . import STOP, ToolResult, register
 
-READ_LIMIT = 20_000
+READ_LIMIT = 12_000  # ~3k tokens, fits the 8k context with the prompt
 
 
 def _paths(args: dict, cfg: dict, key: str = "paths") -> list[str]:
@@ -80,14 +81,18 @@ def _read(a: dict, cfg: dict) -> ToolResult:
     p = Path(a["path"])
     if p.is_dir():
         return ToolResult("That's a folder; use find_files.")
-    if p.suffix.lower() in {".pdf", ".docx", ".doc", ".pages"}:
-        return ToolResult("Reading PDF and Word files isn't supported yet.")
-    text = p.read_text(errors="replace")
-    return ToolResult(text[:READ_LIMIT] + ("\n[truncated]" if len(text) > READ_LIMIT else ""))
+    try:
+        pages = extract.pages(p)
+    except ValueError as e:
+        return ToolResult(str(e))
+    text = "\n".join(f"[page {n}]\n{t}" if n else t for n, t in pages)
+    # shortcut: long files are cut to fit the model's context; summarise in parts if this becomes common
+    return ToolResult(text[:READ_LIMIT] + (f"\n[truncated: showed {READ_LIMIT} of {len(text)} characters]"
+                                           if len(text) > READ_LIMIT else ""))
 
 
 register(
-    name="read_file", description="Read a text file inside the allowed folders.",
+    name="read_file", description="Read a file inside the allowed folders: text, code, PDF, Word (.docx) or an image (OCR).",
     params={"path": {"type": "string"}}, required=["path"], tier=0,
     check=lambda a, c: {"path": str(resolve(a.get("path", ""), c, must_exist=True))},
     run=_read, untrusted_output=True, summary=lambda a: f"Read {display(a['path'])}",

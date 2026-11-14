@@ -1,11 +1,13 @@
 """jarvisd: wires the agent together and serves the API on 127.0.0.1 (browser) and a Unix socket (CLI, menu bar)."""
 import asyncio
 import re
+import time
 import uuid
 from pathlib import Path
 
 import httpx
 import uvicorn
+from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from . import config
@@ -14,12 +16,16 @@ from .agent import context, fastpath, planner
 from .agent.executor import Executor
 from .api import ActionId, Forget, MemoryId, Message, Pin, create_app
 from .llm import ollama
+from .documents.extract import DOC_EXT
+from .documents.index import DocIndex
 from .memory import capture
 from .memory.store import MemoryStore
 from .policy.pending import PendingStore
 from .tools import STOP
+from .tools import docs as doc_tools
 
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 120  # reading a PDF or a screenshot can take a while on battery
+INBOX = Path.home() / "Jarvis/Inbox"
 _CONFIRM = re.compile(r"^(?:confirm|yes|haan|ha|ok|do it|kar do)(?:\s+(a\d+))?$")
 _CANCEL = re.compile(r"^(?:cancel|no|nahi|mat karo)(?:\s+(a\d+))?$")
 
@@ -35,6 +41,11 @@ class Jarvis:
         self.pending = PendingStore()
         self.activity = Activity(str(config.APP_DIR / "jarvis.db"))
         self.memory = MemoryStore(str(config.APP_DIR / "jarvis.db"))
+        embed_model = cfg["models"]["embed"]
+        has_embed = embed_model in (ollama.installed_models() or set())
+        self.docs = DocIndex(str(config.APP_DIR / "jarvis.db"),
+                             embed=(lambda texts: ollama.embed(embed_model, texts)) if has_embed else None)
+        doc_tools.INDEX = self.docs
         self.executor = Executor(cfg, self.activity, self.pending)
         self.running: set[asyncio.Task] = set()
 
@@ -248,8 +259,48 @@ def build_app():
         n = await asyncio.to_thread(j.memory.forget_everything, b.include_pinned, ("activity",))
         return {"reply": f"Forgot {n} memories and the activity log."}
 
+    @app.get("/api/documents")
+    async def documents():
+        return await asyncio.to_thread(j.docs.stats)
+
+    @app.post("/api/upload")
+    async def upload(request: Request, name: str):
+        """Drag-and-drop: save the file to ~/Jarvis/Inbox so tools can read it (kept 14 days)."""
+        safe = re.sub(r"[^\w .()-]", "_", Path(name).name).strip(" .")[:120] or "file"
+        if Path(safe).suffix.lower() not in DOC_EXT:
+            raise HTTPException(415, "unsupported file type")
+        body = await request.body()
+        if len(body) > 30_000_000:
+            raise HTTPException(413, "file too large (30 MB max)")
+        INBOX.mkdir(parents=True, exist_ok=True)
+        target = INBOX / safe
+        if target.exists():
+            target = INBOX / f"{target.stem}-{int(time.time())}{target.suffix}"
+        target.write_bytes(body)
+        return {"path": "~/" + str(target.relative_to(Path.home()))}
+
     app.state.jarvis = j
     return app
+
+
+async def index_loop(j: Jarvis) -> None:
+    """Keep the document index in step with the watched folders (startup, then hourly)."""
+    # shortcut: hourly rescan by modified time instead of FSEvents; add watchdog if hourly feels stale
+    while True:
+        try:
+            stats = await asyncio.to_thread(j.docs.scan, j.cfg["documents"]["index_folders"], j.cfg, stop=STOP)
+            print(f"document index: {stats}", flush=True)
+        except Exception as e:
+            print(f"document index failed: {e}", flush=True)
+        await asyncio.sleep(3600)
+
+
+def _clean_jarvis_files(now: float) -> None:
+    """Jarvis's own screenshots and dropped files follow the 14-day rule."""
+    for folder in (doc_tools.SCREENSHOTS, INBOX):
+        for f in folder.glob("*") if folder.exists() else []:
+            if f.is_file() and f.stat().st_mtime < now - 14 * 86400:
+                f.unlink()
 
 
 async def purge_loop(j: Jarvis) -> None:
@@ -258,6 +309,7 @@ async def purge_loop(j: Jarvis) -> None:
         if await asyncio.to_thread(j.memory.purge_due):
             try:
                 await asyncio.to_thread(j.memory.purge, None, (("activity", "ts"),))
+                await asyncio.to_thread(_clean_jarvis_files, time.time())
             except Exception as e:  # never crash the daemon over a purge; it retries next hour
                 print(f"memory purge failed: {e}", flush=True)
         await asyncio.sleep(3600)
@@ -269,7 +321,7 @@ async def _serve() -> None:
     # uvicorn makes the socket 0666; the 0700 app dir and the token still keep other users out
     tcp = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=config.PORT, log_level="warning"))
     uds = uvicorn.Server(uvicorn.Config(app, uds=str(config.SOCK_PATH), log_level="warning"))
-    await asyncio.gather(tcp.serve(), uds.serve(), purge_loop(app.state.jarvis))
+    await asyncio.gather(tcp.serve(), uds.serve(), purge_loop(app.state.jarvis), index_loop(app.state.jarvis))
 
 
 def serve() -> None:

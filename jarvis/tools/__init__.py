@@ -39,4 +39,4 @@ def register(**kw) -> Tool:
     return t
 
 
-from . import apps, files, pim  # noqa: E402,F401  (registers tools)
+from . import apps, docs, files, pim  # noqa: E402,F401  (registers tools)

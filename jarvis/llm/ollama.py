@@ -1,4 +1,5 @@
 """Talks to the local Ollama server only."""
+import base64
 import json
 import re
 
@@ -18,7 +19,7 @@ async def chat_message(model: str, messages: list[dict], tools: list[dict] | Non
     """One chat turn; returns the assistant message (may contain tool_calls)."""
     # cap length: small models sometimes loop forever without it
     body = {"model": model, "messages": messages, "stream": False, "think": False,
-            "options": {"num_predict": 1024 if tools else 300}}
+            "options": {"num_predict": 1024 if tools else 300, "num_ctx": 8192 if tools else 4096}}
     if tools:
         body["tools"] = tools
     async with httpx.AsyncClient(base_url=OLLAMA_URL, timeout=120) as c:
@@ -77,6 +78,25 @@ async def unload(model: str) -> None:
             await c.post("/api/generate", json={"model": model, "keep_alive": 0})
     except httpx.HTTPError:
         pass
+
+
+def embed(model: str, texts: list[str]) -> list[list[float]]:
+    """Embeddings for document chunks and queries (sync: used from worker threads)."""
+    out = []
+    for i in range(0, len(texts), 32):
+        r = httpx.post(f"{OLLAMA_URL}/api/embed", json={"model": model, "input": texts[i:i + 32]}, timeout=120)
+        r.raise_for_status()
+        out += r.json()["embeddings"]
+    return out
+
+
+def describe_image(model: str, png: bytes, question: str) -> str:
+    """Vision model answer about one image (sync)."""
+    body = {"model": model, "stream": False, "options": {"num_predict": 400},
+            "messages": [{"role": "user", "content": question, "images": [base64.b64encode(png).decode()]}]}
+    r = httpx.post(f"{OLLAMA_URL}/api/chat", json=body, timeout=180)
+    r.raise_for_status()
+    return r.json()["message"]["content"].strip()
 
 
 def installed_models() -> set[str] | None:
