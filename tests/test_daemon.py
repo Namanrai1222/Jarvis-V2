@@ -23,7 +23,7 @@ def test_chat_goes_to_quick_brain(jarvis, monkeypatch):
     async def needs_tools(model, text):
         return False
 
-    async def chat(model, text):
+    async def chat(model, text, memory=""):
         return f"{model} says hi"
 
     monkeypatch.setattr(daemon.ollama, "needs_tools", needs_tools)

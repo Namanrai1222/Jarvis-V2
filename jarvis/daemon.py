@@ -10,10 +10,12 @@ from fastapi.responses import HTMLResponse
 
 from . import config
 from .activity import Activity
-from .agent import fastpath, planner
+from .agent import context, fastpath, planner
 from .agent.executor import Executor
-from .api import ActionId, Message, create_app
+from .api import ActionId, Forget, MemoryId, Message, Pin, create_app
 from .llm import ollama
+from .memory import capture
+from .memory.store import MemoryStore
 from .policy.pending import PendingStore
 from .tools import STOP
 
@@ -22,11 +24,17 @@ _CONFIRM = re.compile(r"^(?:confirm|yes|haan|ha|ok|do it|kar do)(?:\s+(a\d+))?$"
 _CANCEL = re.compile(r"^(?:cancel|no|nahi|mat karo)(?:\s+(a\d+))?$")
 
 
+def _clean(reply: str) -> str:
+    """Models sometimes echo our internal tags; never show them."""
+    return re.sub(r"</?(?:untrusted|memory)\b[^>]*>", "", reply).strip() or "Done."
+
+
 class Jarvis:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
         self.pending = PendingStore()
         self.activity = Activity(str(config.APP_DIR / "jarvis.db"))
+        self.memory = MemoryStore(str(config.APP_DIR / "jarvis.db"))
         self.executor = Executor(cfg, self.activity, self.pending)
         self.running: set[asyncio.Task] = set()
 
@@ -43,7 +51,37 @@ class Jarvis:
         if t in {"pause"}:
             self.executor.paused = True
             return "Paused. I'll answer but won't take actions until you say resume."
+        if t in {"what do you remember about me", "what do you know about me", "tumhe mere baare mein kya yaad hai"}:
+            return self._recall_facts()
         return None
+
+    def _remember(self, text: str) -> str | None:
+        parsed = capture.parse_remember(text)
+        if parsed is None:
+            return None
+        fact, forever = parsed
+        if capture.redact(fact)[1]:
+            return "I won't store passwords, OTPs, card or ID numbers. Keep those in the Passwords app or Keychain."
+        self.memory.add("fact", fact, pinned=forever)
+        return f"Pinned: {fact}. I'll keep it until you remove it." if forever else \
+            f"Got it: {fact}. I'll remember this for 14 days; say 'remember forever' to keep it."
+
+    def _recall_facts(self) -> str:
+        facts = self.memory.facts()
+        if not facts:
+            return "I don't have any saved facts yet. Say 'remember forever that …' to pin one."
+        lines = [f"{f['text']} ({'pinned' if f['pinned'] else 'for 14 days'})" for f in facts[:15]]
+        return "Here's what I remember: " + "; ".join(lines) + "."
+
+    def _record(self, text: str, out: dict) -> None:
+        """Historian: store the exchange (secrets redacted) and any activity Naman mentioned."""
+        if out.get("source") not in {"fastpath", "quick", "llm"}:
+            return
+        user, _ = capture.redact(text)
+        reply, _ = capture.redact(out["reply"])
+        self.memory.add("episode", user, reply=reply, tainted=out.get("tainted", False))
+        if act := capture.parse_activity(user):
+            self.memory.add("activity", f"{capture.VERBS[act[0]]} {act[1]}")
 
     def _resolve(self, pid: str | None, fn) -> str:
         items = self.pending.list()
@@ -62,11 +100,16 @@ class Jarvis:
             return {"reply": await self.stop(), "source": "control", "pending": []}
         if (reply := await asyncio.to_thread(self._control, t)) is not None:
             return {"reply": reply, "source": "control", "pending": self._pending_public()}
+        if (reply := await asyncio.to_thread(self._remember, text)) is not None:
+            return {"reply": reply, "source": "memory", "pending": []}
 
         task = asyncio.create_task(self._handle(text))
         self.running.add(task)
         try:
-            return await asyncio.wait_for(task, REQUEST_TIMEOUT)
+            out = await asyncio.wait_for(task, REQUEST_TIMEOUT)
+            await asyncio.to_thread(self._record, text, out)
+            out.pop("tainted", None)
+            return out
         except asyncio.CancelledError:
             return {"reply": "Stopped.", "source": "control", "pending": []}
         except asyncio.TimeoutError:
@@ -97,18 +140,23 @@ class Jarvis:
         async def chat(messages, tools):
             return await ollama.chat_message(model, messages, tools)
 
+        memory, mem_tainted = await asyncio.to_thread(context.build, self.memory, text)
+        if context.EMPTY in memory and context.QUESTION.search(text):  # nothing to recall: don't let a model guess
+            return {"reply": "I don't have anything saved for that time.", "source": "memory", "pending": []}
         try:
             # quick brain: plain chat is answered by the small model; only tasks wake the main one
             if router in models and model != router and not await ollama.needs_tools(router, text):
-                return {"reply": await ollama.chat(router, text), "source": "quick", "pending": []}
-            out = await planner.plan(text, chat=chat, executor=self.executor, cfg=self.cfg, request_id=rid)
+                return {"reply": _clean(await ollama.chat(router, text, memory)), "source": "quick", "pending": [],
+                        "tainted": mem_tainted}
+            out = await planner.plan(text, chat=chat, executor=self.executor, cfg=self.cfg, request_id=rid,
+                                     memory=memory, tainted=mem_tainted)
         except httpx.HTTPError:
             return {"reply": "My language model stopped responding.", "source": "offline", "pending": []}
         # Small models often claim a pending action is already done, so when something waits for
         # approval the reply is ours, not the model's.
-        reply = planner.describe_pending(out["pending"]).strip() if out["pending"] else out["reply"]
-        return {"reply": reply, "source": "llm",
-                "pending": [p.public() for p in out["pending"]]}
+        reply = planner.describe_pending(out["pending"]).strip() if out["pending"] else _clean(out["reply"])
+        return {"reply": reply, "source": "llm", "pending": [p.public() for p in out["pending"]],
+                "tainted": out["tainted"]}
 
     def _pending_public(self) -> list[dict]:
         return [p.public() for p in self.pending.list()]
@@ -183,7 +231,36 @@ def build_app():
     async def activity():
         return j.activity.recent()
 
+    @app.get("/api/memory")
+    async def memory(q: str = ""):
+        return await asyncio.to_thread(j.memory.browse, q[:200])
+
+    @app.post("/api/memory/pin")
+    async def pin(b: Pin):
+        return {"ok": await asyncio.to_thread(j.memory.set_pinned, b.id, b.pinned)}
+
+    @app.post("/api/memory/delete")
+    async def delete(b: MemoryId):
+        return {"ok": await asyncio.to_thread(j.memory.delete, b.id)}
+
+    @app.post("/api/memory/forget")
+    async def forget(b: Forget):
+        n = await asyncio.to_thread(j.memory.forget_everything, b.include_pinned, ("activity",))
+        return {"reply": f"Forgot {n} memories and the activity log."}
+
+    app.state.jarvis = j
     return app
+
+
+async def purge_loop(j: Jarvis) -> None:
+    """Nightly 14-day purge. Checks hourly, so a laptop asleep at 03:30 catches up on wake."""
+    while True:
+        if await asyncio.to_thread(j.memory.purge_due):
+            try:
+                await asyncio.to_thread(j.memory.purge, None, (("activity", "ts"),))
+            except Exception as e:  # never crash the daemon over a purge; it retries next hour
+                print(f"memory purge failed: {e}", flush=True)
+        await asyncio.sleep(3600)
 
 
 async def _serve() -> None:
@@ -192,7 +269,7 @@ async def _serve() -> None:
     # uvicorn makes the socket 0666; the 0700 app dir and the token still keep other users out
     tcp = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=config.PORT, log_level="warning"))
     uds = uvicorn.Server(uvicorn.Config(app, uds=str(config.SOCK_PATH), log_level="warning"))
-    await asyncio.gather(tcp.serve(), uds.serve())
+    await asyncio.gather(tcp.serve(), uds.serve(), purge_loop(app.state.jarvis))
 
 
 def serve() -> None:

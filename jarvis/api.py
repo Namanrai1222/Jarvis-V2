@@ -18,6 +18,20 @@ class Message(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+class MemoryId(BaseModel):
+    id: int
+
+
+class Pin(BaseModel):
+    id: int
+    pinned: bool
+
+
+class Forget(BaseModel):
+    confirm: str = Field(pattern="^FORGET$")  # must be typed exactly, like the spec's safety word
+    include_pinned: bool = False
+
+
 class ActionId(BaseModel):
     id: str = Field(pattern=r"^[Aa]\d{1,6}$")
 

@@ -31,6 +31,7 @@ class Activity:
         self._lock = threading.Lock()
         self._clock = clock
         with self._lock:
+            self._db.execute("PRAGMA secure_delete = ON")
             self._db.executescript(SCHEMA)
         self.prune()
 

@@ -31,17 +31,20 @@ def _wrap_untrusted(source: str, text: str) -> str:
     return f'<untrusted source="{source}">\n{text}\n</untrusted>'
 
 
-async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, request_id: str) -> dict:
-    messages = [{"role": "system", "content": system_prompt(cfg)}, {"role": "user", "content": text}]
+async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, request_id: str,
+               memory: str = "", tainted: bool = False) -> dict:
+    """Returns {reply, pending, tainted}. Memory that was itself tainted starts the request tainted."""
+    system = system_prompt(cfg) + (f"\n\n{memory}" if memory else "")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": text}]
     schemas = [t.schema() for t in REGISTRY.values()]
-    tainted, bad, pending = False, 0, []
+    bad, pending = 0, []
 
     for _ in range(MAX_STEPS):
         msg = await chat(messages, schemas)
         calls = msg.get("tool_calls") or []
         messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": calls})
         if not calls:
-            return {"reply": msg.get("content", "").strip() or "Done.", "pending": pending}
+            return {"reply": msg.get("content", "").strip() or "Done.", "pending": pending, "tainted": tainted}
         for call in calls:
             fn = call.get("function", {})
             name, args = fn.get("name", ""), fn.get("arguments") or {}
@@ -58,7 +61,7 @@ async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, reques
             except (UnknownTool, ValueError) as e:
                 bad += 1
                 if bad >= MAX_BAD_CALLS:
-                    return {"reply": "I'm not sure how to do that. Can you say it another way?", "pending": pending}
+                    return {"reply": "I'm not sure how to do that. Can you say it another way?", "pending": pending, "tainted": tainted}
                 result, p = f"Invalid tool call: {e}", None
             if p is not None:
                 pending.append(p)
@@ -68,7 +71,7 @@ async def plan(text: str, *, chat: ChatFn, executor: Executor, cfg: dict, reques
                 result = _wrap_untrusted(name, result)
             messages.append({"role": "tool", "content": result, "tool_name": name})
     return {"reply": "I stopped after 8 steps. Here's where things stand; ask me to continue if needed.",
-            "pending": pending}
+            "pending": pending, "tainted": tainted}
 
 
 def describe_pending(pending: list[Pending]) -> str:

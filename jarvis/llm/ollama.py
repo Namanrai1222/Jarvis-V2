@@ -9,7 +9,7 @@ from ..config import OLLAMA_URL
 CHAT_SYSTEM = (
     "You are Jarvis, Naman's private assistant running locally on a MacBook. "
     "Reply in one to three short sentences that sound natural when spoken aloud. "
-    "You understand English and Hinglish; if Naman writes Hinglish in English letters, reply the same way, "
+    "You understand English and Hinglish; always write in English letters (Latin script), even for Hinglish; "
     "never in Devanagari. In this mode you cannot take actions, so never claim you did something."
 )
 
@@ -65,8 +65,9 @@ async def needs_tools(model: str, text: str) -> bool:
         return True  # unreadable answer: let the main brain handle it
 
 
-async def chat(model: str, text: str) -> str:
-    msg = await chat_message(model, [{"role": "system", "content": CHAT_SYSTEM}, {"role": "user", "content": text}])
+async def chat(model: str, text: str, memory: str = "") -> str:
+    system = CHAT_SYSTEM + (f"\n\n{memory}" if memory else "")
+    msg = await chat_message(model, [{"role": "system", "content": system}, {"role": "user", "content": text}])
     return msg["content"].strip()
 
 

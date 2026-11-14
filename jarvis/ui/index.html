@@ -15,6 +15,7 @@
             --accent: #6d8ff0; --accent-ink: #0d1020; --amber: #e3a53c; --amber-bg: #2b2414; --danger: #e06666; --me: #232a3a; }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--ink);
          font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
@@ -32,6 +33,20 @@
   .dot.ready { border-color: #2e9e5b; } .dot.paused { background: var(--amber); border-color: var(--amber); }
   .dot.offline { border-style: dashed; }
   header .spacer { flex: 1; }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button { border-color: transparent; background: transparent; color: var(--muted); padding: 4px 10px; }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-color: var(--line); background: var(--panel); }
+  #memview { flex: 1; overflow-y: auto; padding: 14px 18px; }
+  .memtools { display: flex; gap: 8px; }
+  .memtools input { flex: 1; padding: 8px 11px; border-radius: 8px; border: 1px solid var(--line);
+                    background: var(--panel); color: var(--ink); font: inherit; }
+  .mem { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); padding: 9px 12px; margin-top: 8px; }
+  .mem .meta { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+  .mem .meta .spacer { flex: 1; }
+  .mem .body { margin: 4px 0 0; white-space: pre-wrap; word-wrap: break-word; }
+  .mem .reply { color: var(--muted); font-size: 13px; }
+  .mem button { padding: 2px 9px; font-size: 12px; }
+  .mem.pinned { border-color: var(--accent); }
   main { display: flex; flex-direction: column; min-height: 0; }
   #log { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 75%; padding: 9px 13px; border-radius: var(--radius); background: var(--panel);
@@ -77,7 +92,20 @@
       <h1>Jarvis</h1>
       <span class="status"><span class="dot" id="dot"></span><span id="state">Connecting…</span></span>
       <span class="spacer"></span>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-chat" aria-selected="true">Chat</button>
+        <button role="tab" id="tab-mem" aria-selected="false">Memory</button>
+      </nav>
     </header>
+    <section id="memview" hidden>
+      <div class="memtools">
+        <input id="memq" type="search" placeholder="Search memories…" aria-label="Search memories">
+        <button class="stop" id="forget">Forget everything</button>
+      </div>
+      <p class="hint">Kept 14 days, then deleted for real. Pinned items stay until you remove them.
+        Say “remember forever that …” to pin a fact.</p>
+      <div id="memlist"></div>
+    </section>
     <div id="log" aria-live="polite">
       <div class="empty" id="empty">
         <p><b>Ask Jarvis anything.</b></p>
@@ -142,7 +170,8 @@ function addMsg(text, who, src) {
   return m;
 }
 
-const SRC = { fastpath: "instant", llm: "thought it through", control: "control", offline: "model offline", timeout: "timed out" };
+const SRC = { fastpath: "instant", quick: "quick brain", llm: "thought it through", memory: "memory",
+              control: "control", offline: "model offline", timeout: "timed out" };
 
 async function send(text) {
   addMsg(text, "me");
@@ -238,6 +267,58 @@ document.addEventListener("keydown", (e) => {
 $("stop").onclick = async () => { const o = await api("/api/stop", {}); addMsg(o.reply, "jarvis", "control"); refresh(); };
 $("pause").onclick = () => send(paused ? "resume" : "pause");
 $("undo").onclick = async () => { const o = await api("/api/undo", {}); addMsg(o.reply, "jarvis", "control"); refresh(); };
+
+// --- Memory tab ---
+function showTab(mem) {
+  $("tab-chat").setAttribute("aria-selected", String(!mem));
+  $("tab-mem").setAttribute("aria-selected", String(mem));
+  $("memview").hidden = !mem;
+  $("log").hidden = mem;
+  $("form").hidden = mem;
+  if (mem) loadMemory(); else $("input").focus();
+}
+
+function expiry(m) {
+  if (m.pinned) return "pinned";
+  const days = Math.max(0, Math.ceil((m.expires_at * 1000 - Date.now()) / 86400000));
+  return days <= 1 ? "expires today" : `expires in ${days} days`;
+}
+
+async function loadMemory() {
+  const box = $("memlist");
+  let items;
+  try { items = await api("/api/memory?q=" + encodeURIComponent($("memq").value)); }
+  catch (e) { box.replaceChildren(el("p", "none", e.message)); return; }
+  box.replaceChildren();
+  if (!items.length) { box.appendChild(el("p", "none", "Nothing remembered yet.")); return; }
+  for (const m of items) {
+    const card = el("div", "mem" + (m.pinned ? " pinned" : ""));
+    const meta = el("div", "meta");
+    meta.append(el("span", "tag", m.kind), el("span", "",
+      new Date(m.created_at * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })),
+      el("span", "", expiry(m)), el("span", "spacer"));
+    const pin = el("button", "", m.pinned ? "Unpin" : "Pin");
+    pin.onclick = async () => { await api("/api/memory/pin", { id: m.id, pinned: !m.pinned }); loadMemory(); };
+    const del = el("button", "", "Delete");
+    del.onclick = async () => { await api("/api/memory/delete", { id: m.id }); loadMemory(); };
+    meta.append(pin, del);
+    card.append(meta, el("p", "body", m.kind === "episode" ? "You: " + m.text : m.text));
+    if (m.reply) card.appendChild(el("p", "body reply", "Jarvis: " + m.reply));
+    box.appendChild(card);
+  }
+}
+
+$("tab-chat").onclick = () => showTab(false);
+$("tab-mem").onclick = () => showTab(true);
+let memTimer;
+$("memq").oninput = () => { clearTimeout(memTimer); memTimer = setTimeout(loadMemory, 250); };
+$("forget").onclick = async () => {
+  const word = prompt("This deletes all memories and the activity log. Pinned facts are kept.\nType FORGET to confirm.");
+  if (word !== "FORGET") return;
+  const out = await api("/api/memory/forget", { confirm: "FORGET" });
+  alert(out.reply);
+  loadMemory(); refresh();
+};
 
 refresh();
 setInterval(refresh, 15000);
