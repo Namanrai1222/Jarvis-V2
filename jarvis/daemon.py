@@ -30,14 +30,6 @@ class Jarvis:
         self.executor = Executor(cfg, self.activity, self.pending)
         self.running: set[asyncio.Task] = set()
 
-    # --- models ---
-    def _model(self) -> str | None:
-        models = ollama.installed_models() or set()
-        for role in ("main", "router"):
-            if self.cfg["models"][role] in models:
-                return self.cfg["models"][role]
-        return None
-
     # --- control words (trusted: only Naman types or speaks to Jarvis) ---
     def _control(self, t: str) -> str | None:
         if m := _CONFIRM.match(t):
@@ -95,7 +87,9 @@ class Jarvis:
             reply = " ".join(replies) + planner.describe_pending(pending)
             return {"reply": reply.strip(), "source": "fastpath", "pending": [p.public() for p in pending]}
 
-        model = await asyncio.to_thread(self._model)
+        models = await asyncio.to_thread(ollama.installed_models) or set()
+        router, main = self.cfg["models"]["router"], self.cfg["models"]["main"]
+        model = main if main in models else router if router in models else None
         if model is None:
             return {"reply": "My language model is offline. Simple commands still work.", "source": "offline",
                     "pending": []}
@@ -104,6 +98,9 @@ class Jarvis:
             return await ollama.chat_message(model, messages, tools)
 
         try:
+            # quick brain: plain chat is answered by the small model; only tasks wake the main one
+            if router in models and model != router and not await ollama.needs_tools(router, text):
+                return {"reply": await ollama.chat(router, text), "source": "quick", "pending": []}
             out = await planner.plan(text, chat=chat, executor=self.executor, cfg=self.cfg, request_id=rid)
         except httpx.HTTPError:
             return {"reply": "My language model stopped responding.", "source": "offline", "pending": []}
